@@ -659,6 +659,15 @@ mod tests {
                 Symbol::new(Sym::Eof, 15),
             ]
         );
+        succ!(
+            "hello = 'world' # zing bing bang",
+            &[
+                Symbol::with_span(Sym::Key, 0, 4),
+                Symbol::new(Sym::Assign, 6),
+                Symbol::with_span(Sym::String, 9, 13),
+                Symbol::new(Sym::Eof, 32),
+            ]
+        );
     }
 
     #[test]
