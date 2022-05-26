@@ -3,29 +3,37 @@ use memchr::memmem;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// Encounted an illegal control character in a comment.
-    IllegalControlCharacter {
-        pos: BytePos,
+    ControlCharacter {
+        pos: usize,
     },
-    /// A string has too many sequential quote characters.
+    /// A string contains too many consececutive quote characters.
     TooManyQuotesInString {
-        start: BytePos,
-        pos: BytePos,
+        start: usize,
+        pos: usize,
     },
     /// String was not terminated.
     UnterminatedString {
-        start: BytePos,
-        pos: BytePos,
+        start: usize,
+        pos: usize,
     },
     /// A newline was encountered while parsing a key.
     MultilineKey {
-        pos: BytePos,
+        pos: usize,
+    },
+    /// A multi-line literal string or basic string was encountered where it's not allowed (e.g. in a table).
+    MultilineString {
+        pos: usize,
     },
     /// The parser did not consume the entire input string.
     UnconsumedInput {
-        pos: BytePos,
+        pos: usize,
+    },
+    Expected {
+        pos: usize,
+        c: char,
     },
     Unexpected {
-        pos: BytePos,
+        pos: usize,
     },
 }
 
@@ -37,13 +45,10 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BytePos(pub usize);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    lo: BytePos,
-    hi: BytePos,
+    lo: usize,
+    hi: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +77,20 @@ pub struct Symbol {
 }
 
 impl Symbol {
+    pub const fn new(sym: Sym, pos: usize) -> Self {
+        Symbol {
+            sym,
+            span: Span { lo: pos, hi: pos },
+        }
+    }
+
+    pub const fn with_span(sym: Sym, lo: usize, hi: usize) -> Self {
+        Symbol {
+            sym,
+            span: Span { lo, hi },
+        }
+    }
+
     pub fn sym(&self) -> Sym {
         self.sym
     }
@@ -99,13 +118,8 @@ impl<'a> Lex<'a> {
     }
 
     #[inline(always)]
-    fn peek(&self) -> u8 {
-        *self.text.as_bytes().get(self.index + 1).unwrap_or(&0)
-    }
-
-    #[inline(always)]
     fn eat(&mut self, c: u8) -> bool {
-        if self.peek() == c {
+        if self.current == c {
             self.next();
             true
         } else {
@@ -114,80 +128,80 @@ impl<'a> Lex<'a> {
     }
 
     #[inline(always)]
-    fn advance_to(&mut self, index: usize) {
-        self.index = index;
+    fn next(&mut self) {
+        self.index += 1;
+        self.current = *self.text.as_bytes().get(self.index).unwrap_or(&0);
+        //println!("{}", self.current as char);
     }
 
     #[inline(always)]
-    fn next(&mut self) {
-        self.index += 1;
+    fn peek(&self) -> u8 {
+        *self.text.as_bytes().get(self.index + 1).unwrap_or(&0)
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, index: usize) {
+        self.index = index;
         self.current = *self.text.as_bytes().get(self.index).unwrap_or(&0);
     }
 
     #[inline(always)]
     fn push(&mut self, sym: Sym) {
-        self.symbols.push(Symbol {
-            sym,
-            span: Span {
-                lo: BytePos(self.index),
-                hi: BytePos(self.index),
-            },
-        })
+        self.symbols.push(Symbol::new(sym, self.index))
     }
 
     #[inline(always)]
     fn push_span(&mut self, sym: Sym, lo: usize, hi: usize) {
-        self.symbols.push(Symbol {
-            sym,
-            span: Span {
-                lo: BytePos(lo),
-                hi: BytePos(hi),
-            },
-        })
+        self.symbols.push(Symbol::with_span(sym, lo, hi))
     }
 
     #[cold]
     fn err_unterminated_string(&self, start: usize) -> Result<(), Error> {
         Err(Error::UnterminatedString {
-            start: BytePos(start),
-            pos: BytePos(self.index),
+            start,
+            pos: self.index,
         })
     }
 
     #[cold]
     fn err_too_many_quotes_in_string(&self, start: usize) -> Result<(), Error> {
         Err(Error::TooManyQuotesInString {
-            start: BytePos(start),
-            pos: BytePos(self.index),
+            start,
+            pos: self.index,
         })
     }
 
     #[cold]
     fn err_illegal_control_character(&self) -> Result<(), Error> {
-        Err(Error::IllegalControlCharacter {
-            pos: BytePos(self.index),
-        })
+        Err(Error::ControlCharacter { pos: self.index })
     }
 
     #[cold]
     fn err_multiline_key(&self) -> Result<(), Error> {
-        Err(Error::MultilineKey {
-            pos: BytePos(self.index),
-        })
+        Err(Error::MultilineKey { pos: self.index })
+    }
+
+    #[cold]
+    fn err_illegal_multiline_string(&self) -> Result<(), Error> {
+        Err(Error::MultilineString { pos: self.index })
     }
 
     #[cold]
     fn err_unconsumed_input(&self) -> Result<(), Error> {
-        Err(Error::UnconsumedInput {
-            pos: BytePos(self.index),
+        Err(Error::UnconsumedInput { pos: self.index })
+    }
+
+    #[cold]
+    fn err_expected(&self, c: u8) -> Result<(), Error> {
+        Err(Error::Expected {
+            pos: self.index,
+            c: c as char,
         })
     }
 
     #[cold]
     fn err_unexpected(&self) -> Result<(), Error> {
-        Err(Error::Unexpected {
-            pos: BytePos(self.index),
-        })
+        Err(Error::Unexpected { pos: self.index })
     }
 
     fn scan_key(&mut self) -> Result<(), Error> {
@@ -205,112 +219,150 @@ impl<'a> Lex<'a> {
         }
     }
 
-    fn scan_string(&mut self) -> Result<(), Error> {
-        let text = self.text.as_bytes();
-        match &text[self.index..] {
-            [b'\'', b'\'', b'\'', rest @ ..] => {
-                let start = self.index + 2;
-                if let Some(index) = memmem::find(rest, &[b'\'', b'\'', b'\'']) {
-                    self.advance_to(start + index + 3);
-                    if self.eat(b'\'') {
-                        if self.eat(b'\'') {
-                            if self.peek() == b'\'' {
-                                self.err_too_many_quotes_in_string(start)?;
-                            }
-                        }
-                    }
-                    self.push_span(Sym::String, start, self.index - 3);
-                    Ok(())
-                } else {
-                    self.err_unterminated_string(start)
-                }
-            }
-            [b'\'', rest @ ..] => {
-                let start = self.index + 1;
-                if let Some(index) = memchr::memchr2(b'\n', b'\'', rest) {
-                    self.advance_to(start + index + 1);
-                    if text[index] == b'\'' {
-                        self.push_span(Sym::String, start, index);
-                        return Ok(());
-                    }
-                }
-                self.err_unterminated_string(start)
-            }
-            [b'"', b'"', b'"', ..] => {
-                let start = self.index + 2;
-                self.advance_to(start);
-                let mut quote_count = 0;
-                let mut slash_count = 0;
-                loop {
-                    self.next();
-                    match self.current {
-                        b'"' => {
-                            if slash_count & 1 == 0 {
-                                quote_count += 1;
-                            } else {
-                                quote_count = 0;
-                            }
-                            slash_count = 0;
-                        }
-                        b'\\' => {
-                            match quote_count {
-                                0 | 1 | 2 => {}
-                                3 | 4 | 5 => {
-                                    let extra = quote_count - 3;
-                                    self.push_span(Sym::String, start, self.index - extra);
-                                    return Ok(());
-                                }
-                                _ => return self.err_too_many_quotes_in_string(start),
-                            }
+    fn scan_multiline_basic_string(&mut self) -> Result<(), Error> {
+        debug_assert_eq!(self.current, b'"');
+        self.next();
+        debug_assert_eq!(self.current, b'"');
+        self.next();
+        debug_assert_eq!(self.current, b'"');
+        self.next();
 
-                            slash_count += 1;
-                            quote_count = 0;
+        let start = self.index;
+
+        let mut quote_count = 0;
+        let mut slash_count = 0;
+        loop {
+            match self.current {
+                b'"' => {
+                    if slash_count & 1 == 0 {
+                        quote_count += 1;
+                    } else {
+                        quote_count = 0;
+                    }
+                    slash_count = 0;
+                }
+                b'\\' => {
+                    match quote_count {
+                        0 | 1 | 2 => {}
+                        3 | 4 | 5 => {
+                            let extra = quote_count - 3;
+                            self.push_span(Sym::String, start, self.index - extra);
+                            return Ok(());
                         }
-                        ch @ _ => {
-                            match quote_count {
-                                0 | 1 | 2 => {
-                                    if ch == 0 {
-                                        return self.err_unterminated_string(start);
-                                    }
-                                }
-                                3 | 4 | 5 => {
-                                    let extra = quote_count - 3;
-                                    self.push_span(Sym::String, start, self.index - extra);
-                                    return Ok(());
-                                }
-                                _ => self.err_too_many_quotes_in_string(start)?,
+                        _ => return self.err_too_many_quotes_in_string(start),
+                    }
+
+                    slash_count += 1;
+                    quote_count = 0;
+                }
+                ch @ _ => {
+                    match quote_count {
+                        0 | 1 | 2 => {
+                            if ch == 0 {
+                                return self.err_unterminated_string(start);
                             }
-                            quote_count = 0;
                         }
+                        3 | 4 | 5 => {
+                            let extra = quote_count - 3;
+                            self.push_span(Sym::String, start, self.index - extra);
+                            return Ok(());
+                        }
+                        _ => self.err_too_many_quotes_in_string(start)?,
+                    }
+                    quote_count = 0;
+                }
+            }
+
+            self.next();
+        }
+    }
+
+    fn scan_basic_string(&mut self) -> Result<(), Error> {
+        debug_assert_eq!(self.current, b'"');
+        self.next();
+
+        let start = self.index;
+
+        let mut slash_count = 0;
+        loop {
+            match self.current {
+                b'"' => {
+                    if slash_count & 1 == 0 {
+                        break;
+                    }
+                    slash_count = 0;
+                }
+                b'\\' => slash_count += 1,
+                b'\n' | 0 => self.err_unterminated_string(start)?,
+                _ => slash_count = 0,
+            }
+            self.next();
+        }
+
+        self.push_span(Sym::String, start, self.index);
+        self.next();
+        Ok(())
+    }
+
+    fn scan_multiline_literal_string(&mut self) -> Result<(), Error> {
+        debug_assert_eq!(self.current, b'\'');
+        self.next();
+        debug_assert_eq!(self.current, b'\'');
+        self.next();
+        debug_assert_eq!(self.current, b'\'');
+        self.next();
+
+        let start = self.index;
+        let rest = &self.text.as_bytes()[start..];
+
+        if let Some(index) = memmem::find(rest, &[b'\'', b'\'', b'\'']) {
+            self.advance(start + index + 3);
+            if self.eat(b'\'') {
+                if self.eat(b'\'') {
+                    if self.current == b'\'' {
+                        self.err_too_many_quotes_in_string(start)?;
                     }
                 }
             }
-            [b'"', ..] => {
-                let start = self.index + 1;
-                self.advance_to(start);
-                let mut slash_count = 0;
-                loop {
-                    self.next();
-                    match self.current {
-                        b'"' => {
-                            if slash_count & 1 == 0 {
-                                self.push_span(Sym::String, start, self.index);
-                                return Ok(());
-                            }
-                            slash_count = 0;
-                        }
-                        b'\\' => {
-                            slash_count += 1;
-                        }
-                        b'\n' | 0 => {
-                            self.err_unterminated_string(start)?;
-                        }
-                        _ => {
-                            slash_count = 0;
-                        }
-                    }
-                }
+            self.push_span(Sym::String, start, self.index - 3);
+            Ok(())
+        } else {
+            self.err_unterminated_string(start)
+        }
+    }
+
+    fn scan_literal_string(&mut self) -> Result<(), Error> {
+        debug_assert_eq!(self.current, b'\'');
+        self.next();
+
+        let start = self.index;
+        let rest = &self.text.as_bytes()[start..];
+        if let Some(index) = memchr::memchr3(b'\n', b'\'', b'\0', rest) {
+            self.advance(start + index + 1);
+            if rest[index] == b'\'' {
+                self.push_span(Sym::String, start, index);
+                return Ok(());
             }
+        }
+        self.err_unterminated_string(start)
+    }
+
+    fn scan_string(&mut self) -> Result<(), Error> {
+        match &self.text.as_bytes()[self.index..] {
+            [b'\'', b'\'', b'\'', ..] => self.scan_multiline_literal_string(),
+            [b'"', b'"', b'"', ..] => self.scan_multiline_basic_string(),
+            [b'\'', ..] => self.scan_literal_string(),
+            [b'"', ..] => self.scan_basic_string(),
+            _ => panic!(),
+        }
+    }
+
+    fn scan_single_line_string(&mut self) -> Result<(), Error> {
+        match &self.text.as_bytes()[self.index..] {
+            [b'\'', b'\'', b'\'', ..] => self.err_illegal_multiline_string(),
+            [b'"', b'"', b'"', ..] => self.err_illegal_multiline_string(),
+            [b'\'', ..] => self.scan_literal_string(),
+            [b'"', ..] => self.scan_basic_string(),
             _ => panic!(),
         }
     }
@@ -319,13 +371,72 @@ impl<'a> Lex<'a> {
         todo!()
     }
 
+    fn consume_comment(&mut self) -> Result<(), Error> {
+        loop {
+            self.next();
+            match self.current {
+                b'\n' => break,
+                b'\r' => {
+                    if self.peek() != b'\n' {
+                        self.err_illegal_control_character()?;
+                    }
+                    self.next();
+                    self.next();
+                    break;
+                }
+                0x1..=0x8 | 0xa..=0x1f | 0x7f => {
+                    self.err_illegal_control_character()?;
+                }
+                0x0 => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_line(&mut self) -> Result<(), Error> {
+        loop {
+            match self.current {
+                b'\r' => {
+                    if self.peek() != b'\n' {
+                        self.err_illegal_control_character()?;
+                    }
+                    self.next();
+                    self.next();
+                    break;
+                }
+                b' ' | b'\t' => self.next(),
+                b'\n' | 0 => break,
+                b'#' => {
+                    self.consume_comment()?;
+                    break;
+                }
+                _ => self.err_unexpected()?,
+            }
+        }
+
+        Ok(())
+    }
+
     fn scan_table(&mut self) -> Result<(), Error> {
+        debug_assert_eq!(self.current, b'[');
         self.next();
+
+        let is_array = self.eat(b'[');
+
+        self.push(if is_array {
+            Sym::ArrayOfTable
+        } else {
+            Sym::Table
+        });
+
         let mut saw_dot = true;
         loop {
             match self.current {
                 b'\r' => {
-                    if !self.eat(b'\n') {
+                    if self.peek() != b'\n' {
                         self.err_illegal_control_character()?;
                     }
                     self.err_multiline_key()?
@@ -351,14 +462,13 @@ impl<'a> Lex<'a> {
                         self.err_unexpected()?
                     }
                     saw_dot = false;
-                    self.scan_string()?
+                    self.scan_single_line_string()?
                 }
                 b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
                     if !saw_dot {
                         self.err_unexpected()?
                     }
                     self.scan_key()?;
-                    println!("{}", self.current as char);
                     match self.current {
                         b'.' => {
                             saw_dot = true;
@@ -375,6 +485,14 @@ impl<'a> Lex<'a> {
             }
         }
 
+        if is_array && !self.eat(b']') {
+            self.err_expected(b']')?;
+        }
+
+        self.consume_line()?;
+
+        self.push(Sym::TableEnd);
+
         Ok(())
     }
 
@@ -384,7 +502,7 @@ impl<'a> Lex<'a> {
         loop {
             match self.current {
                 b'\r' => {
-                    if !self.eat(b'\n') {
+                    if self.peek() != b'\n' {
                         self.err_illegal_control_character()?;
                     }
                     self.err_multiline_key()?
@@ -428,49 +546,18 @@ impl<'a> Lex<'a> {
     }
 
     pub fn scan(&mut self) -> Result<(), Error> {
-        'outer: loop {
+        loop {
             match self.current {
                 b'\r' => {
-                    self.next();
-                    if !self.eat(b'\n') {
+                    if self.peek() != b'\n' {
                         self.err_illegal_control_character()?;
                     }
+                    self.next();
+                    self.next();
                 }
                 b'\n' | b' ' | b'\t' => self.next(),
-                b'#' => 'comment: loop {
-                    self.next();
-                    match self.current {
-                        b'\n' => break 'comment,
-                        b'\r' => {
-                            if self.eat(b'\n') {
-                                break 'comment;
-                            }
-                            self.err_illegal_control_character()?;
-                        }
-                        0x1..=0x8 | 0xa..=0x1f | 0x7f => {
-                            self.err_illegal_control_character()?;
-                        }
-                        0x0 => {
-                            break 'outer;
-                        }
-                        _ => {}
-                    }
-                },
-                b'[' => {
-                    let sym = if self.eat(b'[') {
-                        Sym::ArrayOfTable
-                    } else {
-                        Sym::Table
-                    };
-                    self.push(sym);
-                    self.scan_table()?;
-                    if sym == Sym::ArrayOfTable {
-                        if !self.eat(b']') {
-                            self.err_unexpected()?;
-                        }
-                    }
-                    self.push(Sym::TableEnd);
-                }
+                b'#' => self.consume_comment()?,
+                b'[' => self.scan_table()?,
                 b'"' | b'\'' => {
                     self.scan_string()?;
                     self.scan_dotted()?;
@@ -481,7 +568,7 @@ impl<'a> Lex<'a> {
                     self.scan_dotted()?;
                     self.scan_value()?;
                 }
-                0 => break 'outer,
+                0 => break,
                 _ => self.err_unexpected()?,
             }
         }
@@ -499,89 +586,118 @@ impl<'a> Lex<'a> {
 mod tests {
     use super::*;
 
-    fn fail(text: &str, err: Error) {
-        let mut lex = Lex::new(text);
-        assert_eq!(lex.scan(), Err(err));
+    macro_rules! fail {
+        ($text: expr, $err: expr) => {
+            let mut lex = Lex::new($text);
+            let res = lex.scan();
+            let err = Err($err);
+            if res != err {
+                panic!(
+                    "expected error:\nexpected: {}\n   found: {}",
+                    format!("{:?}", err),
+                    format!("{:?}", res)
+                )
+            }
+        };
     }
 
-    fn success(text: &str, expected_symbols: &[Symbol]) {
-        let mut lex = Lex::new(text);
-        lex.scan().expect("parse failed");
-        let found_symbols = &lex.symbols[..];
-        let max_len = expected_symbols.len().max(found_symbols.len());
-        for i in 0..max_len {
-            let (expected, found) = (expected_symbols.get(i), found_symbols.get(i));
-            if expected != found {
-                for j in 0..max_len {
-                    let (expected, found) = (expected_symbols.get(j), found_symbols.get(j));
-                    eprintln!(
-                        "{} {:<4} === {}",
-                        if i == j { "==>" } else { "   " },
-                        format!("{:?}", expected),
-                        format!("{:?}", found),
-                    );
+    macro_rules! succ {
+        ($text: expr, $syms: expr) => {
+            let mut lex = Lex::new($text);
+            lex.scan().expect("parse failed");
+            let expect_syms: &[Symbol] = $syms;
+            let got_syms = &lex.symbols[..];
+            if expect_syms != got_syms {
+                let max_len = got_syms.len().max(expect_syms.len());
+                for i in 0..max_len {
+                    let (expected, found) = (expect_syms.get(i), got_syms.get(i));
+                    if expected == found {
+                        eprintln!("{:<4} {}", i, format!("{:?}", expected));
+                    } else {
+                        eprintln!("{:<4} expected: {}", i, format!("{:?}", expected),);
+                        eprintln!("{:<4}    found: {}", " ", format!("{:?}", found))
+                    }
                 }
-                panic!("expected {expected:?} but found {found:?}")
+                panic!("assertion failed")
             }
-        }
+        };
     }
 
     #[test]
-    fn basic_failures() {
-        fail(r#"="#, Error::Unexpected { pos: BytePos(0) });
+    fn basic_fail() {
+        fail!("=", Error::Unexpected { pos: 0 });
+        fail!("\0", Error::UnconsumedInput { pos: 0 });
     }
 
     #[test]
     fn basic_success() {
-        success(
-            "",
-            &[Symbol {
-                sym: Sym::Eof,
-                span: Span {
-                    lo: BytePos(0),
-                    hi: BytePos(0),
-                },
-            }],
-        );
-        success(
-            "# Hello,\n# World!",
-            &[Symbol {
-                sym: Sym::Eof,
-                span: Span {
-                    lo: BytePos(17),
-                    hi: BytePos(17),
-                },
-            }],
-        );
-        success(
-            "# Hello,\r\n# World!",
-            &[Symbol {
-                sym: Sym::Eof,
-                span: Span {
-                    lo: BytePos(18),
-                    hi: BytePos(18),
-                },
-            }],
-        );
+        succ!("", &[Symbol::new(Sym::Eof, 0)]);
+    }
+
+    #[test]
+    fn comment_fail() {
+        fail!("# He\u{1}llo,\n# World", Error::ControlCharacter { pos: 4 });
+        fail!("# He\rllo,\r\n# World!", Error::ControlCharacter { pos: 4 });
+    }
+
+    #[test]
+    fn comment_success() {
+        succ!("# Hello,\n# World!", &[Symbol::new(Sym::Eof, 17)]);
+        succ!("# Hello,\r\n# World!", &[Symbol::new(Sym::Eof, 18)]);
     }
 
     #[test]
     fn tables_fail() {
-        fail("[.]", Error::Unexpected { pos: BytePos(1) });
-        fail("[hello.]", Error::Unexpected { pos: BytePos(7) });
+        fail!("[.]", Error::Unexpected { pos: 1 });
+        fail!("[hello", Error::Unexpected { pos: 6 });
+        fail!("[hello.]", Error::Unexpected { pos: 7 });
+        fail!("[.world]", Error::Unexpected { pos: 1 });
+        fail!("[hello.\nworld]", Error::MultilineKey { pos: 7 });
+        fail!("[hello.'''world''']", Error::MultilineString { pos: 7 });
+        fail!(r#"[hello."""world"""]"#, Error::MultilineString { pos: 7 });
+        fail!("[[.]]", Error::Unexpected { pos: 2 });
+        fail!("[[hello", Error::Unexpected { pos: 7 });
+        fail!("[[hello]", Error::Expected { pos: 8, c: ']' });
+        fail!("[[hello.]]", Error::Unexpected { pos: 8 });
+        fail!("[[.world]]", Error::Unexpected { pos: 2 });
+        fail!("[[hello.\nworld]]", Error::MultilineKey { pos: 8 });
+        fail!("[[hello.'''world''']]", Error::MultilineString { pos: 8 });
+        fail!(
+            r#"[[hello."""world"""]]"#,
+            Error::MultilineString { pos: 8 }
+        );
     }
 
     #[test]
     fn tables_success() {
-        success(
+        succ!(
+            "[test-1]",
+            &[
+                Symbol::new(Sym::Table, 1),
+                Symbol::with_span(Sym::Key, 1, 6),
+                Symbol::new(Sym::TableEnd, 8),
+                Symbol::new(Sym::Eof, 8)
+            ]
+        );
+        succ!(
             "[hello.world]",
-            &[Symbol {
-                sym: Sym::Eof,
-                span: Span {
-                    lo: BytePos(18),
-                    hi: BytePos(18),
-                },
-            }],
+            &[
+                Symbol::new(Sym::Table, 1),
+                Symbol::with_span(Sym::Key, 1, 5),
+                Symbol::with_span(Sym::Key, 7, 11),
+                Symbol::new(Sym::TableEnd, 13),
+                Symbol::new(Sym::Eof, 13)
+            ]
+        );
+        succ!(
+            r#"[hello."zing bing bang"]"#,
+            &[
+                Symbol::new(Sym::Table, 1),
+                Symbol::with_span(Sym::Key, 1, 5),
+                Symbol::with_span(Sym::String, 8, 22),
+                Symbol::new(Sym::TableEnd, 24),
+                Symbol::new(Sym::Eof, 24),
+            ]
         );
     }
 }
