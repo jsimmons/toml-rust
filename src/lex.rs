@@ -147,12 +147,16 @@ impl<'a> Lex<'a> {
 
     #[inline(always)]
     fn push(&mut self, sym: Sym) {
-        self.symbols.push(Symbol::new(sym, self.index))
+        let symbol = Symbol::new(sym, self.index);
+        //println!("{:?}", symbol);
+        self.symbols.push(symbol)
     }
 
     #[inline(always)]
     fn push_span(&mut self, sym: Sym, lo: usize, hi: usize) {
-        self.symbols.push(Symbol::with_span(sym, lo, hi))
+        let symbol = Symbol::with_span(sym, lo, hi);
+        //println!("{:?}", symbol);
+        self.symbols.push(symbol)
     }
 
     #[cold]
@@ -204,19 +208,67 @@ impl<'a> Lex<'a> {
         Err(Error::Unexpected { pos: self.index })
     }
 
+    fn consume_comment(&mut self) -> Result<(), Error> {
+        loop {
+            self.next();
+            match self.current {
+                b'\n' => break,
+                b'\r' => {
+                    if self.peek() != b'\n' {
+                        self.err_illegal_control_character()?;
+                    }
+                    self.next();
+                    self.next();
+                    break;
+                }
+                0x1..=0x8 | 0xa..=0x1f | 0x7f => {
+                    self.err_illegal_control_character()?;
+                }
+                0x0 => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_line(&mut self) -> Result<(), Error> {
+        loop {
+            match self.current {
+                b'\r' => {
+                    if self.peek() != b'\n' {
+                        self.err_illegal_control_character()?;
+                    }
+                    self.next();
+                    self.next();
+                    break;
+                }
+                b' ' | b'\t' => self.next(),
+                b'\n' | 0 => break,
+                b'#' => {
+                    self.consume_comment()?;
+                    break;
+                }
+                _ => self.err_unexpected()?,
+            }
+        }
+
+        Ok(())
+    }
+
     fn scan_key(&mut self) -> Result<(), Error> {
         let start = self.index;
         loop {
             self.next();
             match self.current {
                 b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {}
-                b' ' | b'\t' | b'=' | b'.' | b']' => {
-                    self.push_span(Sym::Key, start, self.index - 1);
-                    return Ok(());
-                }
+                b' ' | b'\t' | b'=' | b'.' | b']' => break,
                 _ => self.err_unexpected()?,
             }
         }
+        self.push_span(Sym::Key, start, self.index - 1);
+        Ok(())
     }
 
     fn scan_multiline_basic_string(&mut self) -> Result<(), Error> {
@@ -340,7 +392,7 @@ impl<'a> Lex<'a> {
         if let Some(index) = memchr::memchr3(b'\n', b'\'', b'\0', rest) {
             self.advance(start + index + 1);
             if rest[index] == b'\'' {
-                self.push_span(Sym::String, start, index);
+                self.push_span(Sym::String, start, start + index - 1);
                 return Ok(());
             }
         }
@@ -367,57 +419,31 @@ impl<'a> Lex<'a> {
         }
     }
 
-    fn scan_value(&mut self) -> Result<(), Error> {
+    fn scan_array(&mut self) -> Result<(), Error> {
         todo!()
     }
 
-    fn consume_comment(&mut self) -> Result<(), Error> {
-        loop {
-            self.next();
-            match self.current {
-                b'\n' => break,
-                b'\r' => {
-                    if self.peek() != b'\n' {
-                        self.err_illegal_control_character()?;
-                    }
-                    self.next();
-                    self.next();
-                    break;
-                }
-                0x1..=0x8 | 0xa..=0x1f | 0x7f => {
-                    self.err_illegal_control_character()?;
-                }
-                0x0 => {
-                    break;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+    fn scan_inline_table(&mut self) -> Result<(), Error> {
+        todo!()
     }
 
-    fn consume_line(&mut self) -> Result<(), Error> {
+    fn scan_value(&mut self) -> Result<(), Error> {
         loop {
             match self.current {
                 b'\r' => {
                     if self.peek() != b'\n' {
                         self.err_illegal_control_character()?;
                     }
-                    self.next();
-                    self.next();
-                    break;
+                    self.err_unexpected()?
                 }
+                b'\n' => self.err_unexpected()?,
                 b' ' | b'\t' => self.next(),
-                b'\n' | 0 => break,
-                b'#' => {
-                    self.consume_comment()?;
-                    break;
-                }
+                b'"' | b'\'' => break self.scan_string(),
+                b'{' => break self.scan_inline_table(),
+                b'[' => break self.scan_array(),
                 _ => self.err_unexpected()?,
             }
         }
-
-        Ok(())
     }
 
     fn scan_table(&mut self) -> Result<(), Error> {
@@ -468,18 +494,8 @@ impl<'a> Lex<'a> {
                     if !saw_dot {
                         self.err_unexpected()?
                     }
-                    self.scan_key()?;
-                    match self.current {
-                        b'.' => {
-                            saw_dot = true;
-                            self.next();
-                        }
-                        b']' => {
-                            self.next();
-                            break;
-                        }
-                        _ => self.err_unexpected()?,
-                    }
+                    saw_dot = false;
+                    self.scan_key()?
                 }
                 _ => self.err_unexpected()?,
             }
@@ -520,7 +536,6 @@ impl<'a> Lex<'a> {
                     if saw_dot {
                         self.err_unexpected()?;
                     }
-                    self.push(Sym::Assign);
                     break;
                 }
                 b'"' | b'\'' => {
@@ -534,13 +549,14 @@ impl<'a> Lex<'a> {
                     if !saw_dot {
                         self.err_unexpected()?
                     }
-                    self.scan_key()?;
-                    saw_dot = self.current == b'.';
-                    self.next();
+                    self.scan_key()?
                 }
                 _ => self.err_unexpected()?,
             }
         }
+
+        self.push(Sym::Assign);
+        self.next();
 
         Ok(())
     }
@@ -562,11 +578,13 @@ impl<'a> Lex<'a> {
                     self.scan_string()?;
                     self.scan_dotted()?;
                     self.scan_value()?;
+                    self.consume_line()?;
                 }
                 b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
                     self.scan_key()?;
                     self.scan_dotted()?;
                     self.scan_value()?;
+                    self.consume_line()?;
                 }
                 0 => break,
                 _ => self.err_unexpected()?,
@@ -632,6 +650,15 @@ mod tests {
     #[test]
     fn basic_success() {
         succ!("", &[Symbol::new(Sym::Eof, 0)]);
+        succ!(
+            "hello = 'world'",
+            &[
+                Symbol::with_span(Sym::Key, 0, 4),
+                Symbol::new(Sym::Assign, 6),
+                Symbol::with_span(Sym::String, 9, 13),
+                Symbol::new(Sym::Eof, 15),
+            ]
+        );
     }
 
     #[test]
