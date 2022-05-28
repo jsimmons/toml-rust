@@ -441,6 +441,23 @@ impl<'a> Lex<'a> {
                 b'"' | b'\'' => break self.scan_string(),
                 b'{' => break self.scan_inline_table(),
                 b'[' => break self.scan_array(),
+                b't' | b'f' => match &self.text.as_bytes()[self.index..] {
+                    &[b't', b'r', b'u', b'e', ..] => {
+                        let start = self.index;
+                        let end = self.index + 4;
+                        self.advance(end);
+                        self.push_span(Sym::Bool, start, end);
+                        break Ok(());
+                    }
+                    &[b'f', b'a', b'l', b's', b'e', ..] => {
+                        let start = self.index;
+                        let end = self.index + 5;
+                        self.advance(end);
+                        self.push_span(Sym::Bool, start, end);
+                        break Ok(());
+                    }
+                    _ => self.err_unexpected()?,
+                },
                 _ => self.err_unexpected()?,
             }
         }
@@ -666,6 +683,24 @@ mod tests {
                 Symbol::new(Sym::Assign, 6),
                 Symbol::with_span(Sym::String, 9, 13),
                 Symbol::new(Sym::Eof, 32),
+            ]
+        );
+        succ!(
+            "hello = true",
+            &[
+                Symbol::with_span(Sym::Key, 0, 4),
+                Symbol::new(Sym::Assign, 6),
+                Symbol::with_span(Sym::Bool, 8, 12),
+                Symbol::new(Sym::Eof, 12),
+            ]
+        );
+        succ!(
+            "hello = false",
+            &[
+                Symbol::with_span(Sym::Key, 0, 4),
+                Symbol::new(Sym::Assign, 6),
+                Symbol::with_span(Sym::Bool, 8, 13),
+                Symbol::new(Sym::Eof, 13),
             ]
         );
     }
