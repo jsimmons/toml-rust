@@ -1009,6 +1009,17 @@ mod tests {
                 Symbol::new(Sym::Eof, 24),
             ]
         );
+        succ!(
+            r#"[ j . "🐸" . 'l' ]"#,
+            &[
+                Symbol::new(Sym::Table, 1),
+                Symbol::with_span(Sym::Key, 2, 2),
+                Symbol::with_span(Sym::String, 7, 11),
+                Symbol::with_span(Sym::String, 16, 16),
+                Symbol::new(Sym::TableEnd, 20),
+                Symbol::new(Sym::Eof, 20),
+            ]
+        );
     }
 
     #[test]
