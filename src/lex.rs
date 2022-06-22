@@ -661,6 +661,7 @@ impl<'a> Lex<'a> {
     fn scan_dotted(&mut self) -> Result<(), Error> {
         let mut saw_dot = false;
         loop {
+            self.skip_whitespace()?;
             match self.current {
                 b'\r' => {
                     if self.peek() != b'\n' {
@@ -669,7 +670,6 @@ impl<'a> Lex<'a> {
                     self.err_multiline_key()?
                 }
                 b'\n' => self.err_multiline_key()?,
-                b' ' | b'\t' => self.next(),
                 b'.' => {
                     if saw_dot {
                         self.err_unexpected()?;
